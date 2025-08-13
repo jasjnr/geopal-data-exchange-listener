@@ -1,17 +1,3 @@
-import os, json, uuid, datetime
-from flask import Flask, request, jsonify
-from werkzeug.utils import secure_filename
-
-app = Flask(__name__)
-os.makedirs("uploads", exist_ok=True)
-
-# Optional: simple shared-secret via query string (?token=XYZ)
-WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN")  # set later in Render
-
-@app.get("/health")
-def health():
-    return "OK", 200
-
 @app.post("/geopal/data-exchange")
 def data_exchange():
     # Optional token check
@@ -21,21 +7,22 @@ def data_exchange():
 
     ts = datetime.datetime.utcnow().isoformat() + "Z"
 
-    # Capture all headers (case-insensitive mapping)
+    # 1) Capture headers
     headers = {k: v for k, v in request.headers.items()}
 
-    # Raw body (helps later if we need to verify signatures)
+    # 2) Parse form FIRST (so the stream isn't consumed)
+    fields = {k: request.form.get(k) for k in request.form} if request.form else {}
+
+    # 3) Now safely capture raw body with cache=True (default)
+    raw_body = request.get_data(cache=True, as_text=False)
+
+    # Optional: short preview to logs for debugging (won't exceed logs)
     try:
-        raw_body = request.get_data(cache=False, as_text=False)
+        preview = raw_body[:2000].decode("utf-8", errors="replace") if raw_body else ""
     except Exception:
-        raw_body = None
+        preview = ""
 
-    # Form fields (e.g., job, job_field, job_workflow, job_workflow_file)
-    fields = {}
-    if request.form:
-        fields = {k: request.form.get(k) for k in request.form}
-
-    # Files (e.g., file2upload)
+    # 4) Files (e.g., file2upload)
     files_meta = []
     for name, f in request.files.items():
         filename = secure_filename(f.filename or name)
@@ -47,24 +34,20 @@ def data_exchange():
             "path": dest
         })
 
-    # Persist a snapshot (for local inspection) and log to console (Render Logs)
+    # 5) Persist snapshot
     snap_id = ts.replace(":", "-").replace(".", "-")
     meta_path = os.path.join("uploads", f"{snap_id}.json")
     raw_path  = os.path.join("uploads", f"{snap_id}.raw")
-    snapshot = {"ts": ts, "headers": headers, "fields": fields, "files": files_meta}
+    snapshot = {"ts": ts, "headers": headers, "fields": fields, "files": files_meta, "preview": preview}
     with open(meta_path, "w") as fh:
         json.dump(snapshot, fh, indent=2)
     if raw_body:
         with open(raw_path, "wb") as fh:
             fh.write(raw_body)
 
+    # Log to Render
     print("=== GeoPal Data Exchange Event ===")
     print(json.dumps(snapshot, indent=2))
     print("Saved meta:", meta_path, "raw:", raw_path if raw_body else "(none)")
 
-    # Fast ACK so GeoPal doesn't retry
     return jsonify({"status": "ok"}), 200
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)

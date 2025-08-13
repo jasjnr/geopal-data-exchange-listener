@@ -1,22 +1,46 @@
+import os, json, uuid, datetime
+from flask import Flask, request, jsonify
+from werkzeug.utils import secure_filename
+
+app = Flask(__name__)
+os.makedirs("uploads", exist_ok=True)
+
+# Optional: simple shared-secret via query string (?token=XYZ). Set in Render env.
+WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN")
+
+def _maybe_json(s):
+    if not s or not isinstance(s, str):
+        return s
+    t = s.strip()
+    if (t.startswith("{") and t.endswith("}")) or (t.startswith("[") and t.endswith("]")):
+        try:
+            return json.loads(t)
+        except Exception:
+            return s
+    return s
+
+@app.get("/health")
+def health():
+    return "OK", 200
+
 @app.post("/geopal/data-exchange")
 def data_exchange():
     # Optional token check
-    if WEBHOOK_TOKEN:
-        if request.args.get("token") != WEBHOOK_TOKEN:
-            return jsonify({"error": "unauthorized"}), 401
+    if WEBHOOK_TOKEN and request.args.get("token") != WEBHOOK_TOKEN:
+        return jsonify({"error": "unauthorized"}), 401
 
     ts = datetime.datetime.utcnow().isoformat() + "Z"
 
-    # 1) Capture headers
+    # 1) Headers
     headers = {k: v for k, v in request.headers.items()}
 
-    # 2) Parse form FIRST (so the stream isn't consumed)
+    # 2) Parse form FIRST (don’t consume stream)
     fields = {k: request.form.get(k) for k in request.form} if request.form else {}
+    # Optionally JSON-decode common fields
+    fields = {k: _maybe_json(v) for k, v in fields.items()}
 
-    # 3) Now safely capture raw body with cache=True (default)
+    # 3) Raw body (safe because cache=True by default)
     raw_body = request.get_data(cache=True, as_text=False)
-
-    # Optional: short preview to logs for debugging (won't exceed logs)
     try:
         preview = raw_body[:2000].decode("utf-8", errors="replace") if raw_body else ""
     except Exception:
@@ -29,12 +53,14 @@ def data_exchange():
         dest = os.path.join("uploads", f"{uuid.uuid4().hex}-{filename}")
         f.save(dest)
         files_meta.append({
-            "fieldname": name, "filename": filename,
-            "mimetype": f.mimetype, "size": os.path.getsize(dest),
+            "fieldname": name,
+            "filename": filename,
+            "mimetype": f.mimetype,
+            "size": os.path.getsize(dest),
             "path": dest
         })
 
-    # 5) Persist snapshot
+    # 5) Persist snapshot and raw body
     snap_id = ts.replace(":", "-").replace(".", "-")
     meta_path = os.path.join("uploads", f"{snap_id}.json")
     raw_path  = os.path.join("uploads", f"{snap_id}.raw")
@@ -50,4 +76,15 @@ def data_exchange():
     print(json.dumps(snapshot, indent=2))
     print("Saved meta:", meta_path, "raw:", raw_path if raw_body else "(none)")
 
+    # Fast ACK
     return jsonify({"status": "ok"}), 200
+
+# Optional: catch-all for POST to "/"
+@app.post("/")
+def root_post():
+    # forward to main handler (with same token rule)
+    return data_exchange()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)

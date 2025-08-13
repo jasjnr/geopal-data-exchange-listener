@@ -29,7 +29,8 @@ def data_exchange():
     if WEBHOOK_TOKEN and request.args.get("token") != WEBHOOK_TOKEN:
         return jsonify({"error": "unauthorized"}), 401
 
-    ts = datetime.datetime.utcnow().isoformat() + "Z"
+    from datetime import datetime, UTC
+ts = datetime.now(UTC).isoformat()
 
     # 1) Headers
     headers = {k: v for k, v in request.headers.items()}
